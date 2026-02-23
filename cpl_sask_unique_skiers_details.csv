@@ -1,0 +1,25 @@
+Year,Gender,Discipline,List Name,Publication Date,List ID,Unique SK Skiers In List
+2020,Men,Distance,2020 Final CPL Distance,2020-04-01,1487,11
+2020,Men,Sprint,2020 Final CPL Sprint,2020-04-01,1489,8
+2020,Women,Distance,2020 Final CPL Distance,2020-04-01,1488,8
+2020,Women,Sprint,2020 Final CPL Sprint,2020-04-01,1490,4
+2021,Men,Distance,Final CPL Di 20-21 D2,2021-04-18,1538,1
+2021,Men,Sprint,Final CPL Sp 20-21 V2,2021-04-18,1542,1
+2021,Women,Distance,Final CPL Di 20-21 D2,2021-04-18,1540,2
+2021,Women,Sprint,Final CPL Sp 20-21 V2,2021-04-18,1543,2
+2022,Men,Distance,5th CPL Distance 2022,2022-04-08,1622,16
+2022,Men,Sprint,5th CPL Sprint 2022,2022-04-08,1624,12
+2022,Women,Distance,5th CPL Distance 2022,2022-04-08,1623,15
+2022,Women,Sprint,5th CPL Sprint 2022,2022-04-08,1625,11
+2023,Men,Distance,End of 2023 Season Final,2023-04-09,1684,24
+2023,Men,Sprint,End of 2023 Season Sprint Final,2023-04-09,1686,26
+2023,Women,Distance,End of 2023 Season Final,2023-04-09,1685,15
+2023,Women,Sprint,End of 2023 Season Sprint Final,2023-04-09,1687,13
+2024,Men,Distance,6th CPL Distance 2023-24,2024-04-04,1817,29
+2024,Men,Sprint,6th CPL Sprint 2023-24,2024-04-04,1819,25
+2024,Women,Distance,6th CPL Distance 2023-24,2024-04-04,1818,19
+2024,Women,Sprint,6th CPL Sprint 2023-24,2024-04-04,1820,15
+2025,Men,Distance,7th CPL Distance 2024-25,2025-04-04,1893,30
+2025,Men,Sprint,7th CPL Sprint 2024-25,2025-04-04,1895,28
+2025,Women,Distance,7th CPL Distance 2024-25,2025-04-04,1894,25
+2025,Women,Sprint,7th CPL Sprint 2024-25,2025-04-04,1896,27

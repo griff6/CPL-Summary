@@ -1,334 +1,249 @@
+from __future__ import annotations
+
+import csv
 import re
-import time
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
-
-import pandas as pd
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.service import Service
+from datetime import datetime
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+from urllib.request import Request, urlopen
 
 
-URL = "https://nordiqcanada.ca/races/point-list/"
+INDEX_URL = "https://services.nordiqcanada.ca/ViewPoints.asp"
+LIST_URL = "https://services.nordiqcanada.ca/ViewPointsList.asp?id={list_id}"
+YEARS = list(range(2020, 2026))
+DIVISION_CODE = "SK"
 
-# ---- What you asked for ----
-YEARS = [
-    # Your mapping: "2020" == 2019-2020 final list, end date April 1, 2020
-    ("2020", "2019-2020"),
-    ("2021", "2020-2021"),
-    ("2022", "2021-2022"),
-    ("2023", "2022-2023"),
-    ("2024", "2023-2024"),
-    ("2025", "2024-2025"),
-]
-
-RECORDS = {
-    "Distance": "Final CPL Distance",
-    "Sprint": "Final CPL Sprint",
-}
-
-SEXES = {
-    "Men": "Male",
-    "Women": "Female",
-}
-
-DIVISION_TEXT = "Saskatchewan"
-
-# ---- Output ----
-OUT_DIR = "cpl_exports"
-SUMMARY_OUT = "cpl_sask_summary.csv"
+SUMMARY_CSV = Path("cpl_sask_summary_2020_2025.csv")
+DETAILS_CSV = Path("cpl_sask_selected_final_lists.csv")
 
 
 @dataclass
-class ScrapeResult:
-    year_label: str
-    season_text: str
+class ListRow:
+    list_name: str
+    gender: str
     discipline: str
-    sex_group: str
-    record_text: str
-    rows: pd.DataFrame  # raw rows scraped
+    list_type: str
+    start_date: datetime
+    end_date: datetime
+    publication_date: datetime
+    list_id: int
 
 
-def _safe_mkdir(path: str) -> None:
-    import os
-    os.makedirs(path, exist_ok=True)
+class SimpleTableParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: List[List[str]] = []
+        self._in_tr = False
+        self._in_cell = False
+        self._row: List[str] = []
+        self._cell_parts: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "tr":
+            self._in_tr = True
+            self._row = []
+        elif self._in_tr and tag in ("td", "th"):
+            self._in_cell = True
+            self._cell_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._in_tr and self._in_cell and tag in ("td", "th"):
+            text = "".join(self._cell_parts).replace("\xa0", " ")
+            text = re.sub(r"\s+", " ", text).strip()
+            self._row.append(text)
+            self._in_cell = False
+        elif tag == "tr" and self._in_tr:
+            if self._row:
+                self.rows.append(self._row)
+            self._in_tr = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_cell:
+            self._cell_parts.append(data)
 
 
-def _is_select_element(el) -> bool:
-    return el.tag_name.lower() == "select"
+def fetch_html(url: str) -> str:
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req) as resp:
+        return resp.read().decode("utf-8", errors="ignore")
 
 
-def _try_set_filter_by_select(driver, select_el, visible_text: str) -> bool:
-    """If the control is a <select>, use Selenium Select()."""
-    try:
-        Select(select_el).select_by_visible_text(visible_text)
-        return True
-    except Exception:
-        return False
+def parse_rows_from_html(html: str) -> List[List[str]]:
+    parser = SimpleTableParser()
+    parser.feed(html)
+    return parser.rows
 
 
-def _try_set_filter_by_typing(driver, container_el, visible_text: str) -> bool:
-    """
-    Handles many custom dropdowns:
-    - click container
-    - type option text
-    - press Enter
-    """
-    try:
-        container_el.click()
-        time.sleep(0.2)
-        active = driver.switch_to.active_element
-        active.send_keys(Keys.CONTROL, "a")
-        active.send_keys(visible_text)
-        time.sleep(0.2)
-        active.send_keys(Keys.ENTER)
-        return True
-    except Exception:
-        return False
+def parse_date(value: str) -> datetime:
+    return datetime.strptime(value, "%b %d, %Y")
 
 
-def set_filter_near_label(driver, label_regex: str, option_text: str, timeout: int = 20) -> None:
-    """
-    Generic “find filter by label” helper.
-
-    It searches for an element containing label text (like "Record", "Season", "Division", "Sex")
-    then tries to find the nearest select/control and set it.
-
-    This is the piece most likely to need light tweaking depending on Nordiq’s HTML.
-    """
-    wait = WebDriverWait(driver, timeout)
-
-    # Find any element whose visible text matches the label
-    label_el = wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, f"//*[normalize-space() and re:match(normalize-space(.), '{label_regex}')]")
+def parse_index_rows(rows: Iterable[List[str]]) -> List[ListRow]:
+    out: List[ListRow] = []
+    for row in rows:
+        if len(row) != 10 or row[0] != "View":
+            continue
+        out.append(
+            ListRow(
+                list_name=row[1],
+                gender=row[2],
+                discipline=row[3],
+                list_type=row[4],
+                start_date=parse_date(row[5]),
+                end_date=parse_date(row[6]),
+                publication_date=parse_date(row[8]),
+                list_id=int(row[9]),
+            )
         )
-    )
+    return out
 
 
-def set_filter_by_label_xpath(driver, label_contains: str, option_text: str, timeout: int = 20) -> None:
-    """
-    More compatible version (no XPath regex). Finds a label by partial text, then looks for a nearby control.
+def select_final_lists(index_rows: List[ListRow]) -> Dict[Tuple[int, str, str], ListRow]:
+    selected: Dict[Tuple[int, str, str], ListRow] = {}
+    for year in YEARS:
+        for discipline in ("Distance", "Sprint"):
+            for gender in ("Men", "Women"):
+                candidates = [
+                    r
+                    for r in index_rows
+                    if r.list_type == "Seeding"
+                    and r.discipline == discipline
+                    and r.gender == gender
+                    and r.publication_date.year == year
+                    and "Masters" not in r.list_name
+                ]
+                if not candidates:
+                    raise RuntimeError(
+                        f"No candidate lists found for {year} {discipline} {gender}."
+                    )
 
-    If it can't find a nearby control, you'll edit the XPaths here.
-    """
-    wait = WebDriverWait(driver, timeout)
+                # Prefer lists explicitly labeled as Final.
+                final_named = [
+                    r
+                    for r in candidates
+                    if "final" in r.list_name.lower() or r.list_name.lower().startswith("end of ")
+                ]
+                if final_named:
+                    best = sorted(final_named, key=lambda r: (r.publication_date, r.list_id))[-1]
+                else:
+                    # If no explicit Final exists, use latest spring publication (typical season end).
+                    spring_candidates = [r for r in candidates if r.publication_date.month <= 4]
+                    pool = spring_candidates if spring_candidates else candidates
+                    best = sorted(pool, key=lambda r: (r.publication_date, r.list_id))[-1]
 
-    # 1) locate label-like element
-    label_el = wait.until(
-        EC.presence_of_element_located(
-            (By.XPATH, f"//*[contains(normalize-space(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')), "
-                       f"'{label_contains.lower()}')]")
-        )
-    )
+                selected[(year, discipline, gender)] = best
+    return selected
 
-    # 2) try to find a select next to it (common patterns)
-    candidate_xpaths = [
-        ".//following::select[1]",
-        ".//following::input[1]",
-        ".//following::*[self::div or self::span][1]",
-        "./ancestor::*[self::div or self::section][1]//select",
-        "./ancestor::*[self::div or self::section][1]//input",
+
+def to_float(value: str) -> float:
+    try:
+        return float(value.replace(",", ""))
+    except Exception:
+        return 0.0
+
+
+def summarize_list(list_id: int) -> Tuple[int, float, float]:
+    html = fetch_html(LIST_URL.format(list_id=list_id))
+    rows = parse_rows_from_html(html)
+
+    header_idx = -1
+    for i, row in enumerate(rows):
+        if len(row) == 13 and row[:3] == ["Details", "Rank", "SkierID"]:
+            header_idx = i
+            break
+    if header_idx == -1:
+        raise RuntimeError(f"Could not find athlete table header for list {list_id}.")
+
+    athletes = [
+        row
+        for row in rows[header_idx + 1 :]
+        if len(row) == 13 and row[1].isdigit()
     ]
 
-    control_el = None
-    for xp in candidate_xpaths:
-        try:
-            control_el = label_el.find_element(By.XPATH, xp)
-            if control_el is not None:
-                break
-        except Exception:
-            continue
+    sk_athletes = [row for row in athletes if row[8] == DIVISION_CODE]
+    points = [to_float(row[10]) for row in sk_athletes]
 
-    if control_el is None:
-        raise RuntimeError(
-            f"Could not find a control near label containing '{label_contains}'. "
-            f"Open DevTools and update set_filter_by_label_xpath() candidate_xpaths."
+    count = len(points)
+    total = round(sum(points), 2)
+    avg = round(total / count, 2) if count else 0.0
+    return count, total, avg
+
+
+def write_csv(path: Path, rows: List[Dict[str, object]]) -> None:
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    index_html = fetch_html(INDEX_URL)
+    index_rows = parse_index_rows(parse_rows_from_html(index_html))
+    selected = select_final_lists(index_rows)
+
+    detail_rows: List[Dict[str, object]] = []
+    year_rows: List[Dict[str, object]] = []
+
+    for year in YEARS:
+        metrics: Dict[Tuple[str, str], Tuple[int, float, float]] = {}
+        for discipline in ("Distance", "Sprint"):
+            for gender in ("Men", "Women"):
+                chosen = selected[(year, discipline, gender)]
+                count, total, avg = summarize_list(chosen.list_id)
+                metrics[(discipline, gender)] = (count, total, avg)
+
+                detail_rows.append(
+                    {
+                        "Year": year,
+                        "Discipline": discipline,
+                        "Gender": gender,
+                        "List Name": chosen.list_name,
+                        "Publication Date": chosen.publication_date.date().isoformat(),
+                        "List ID": chosen.list_id,
+                        "SK Racers": count,
+                        "SK Total Points": total,
+                        "SK Average Points": avg,
+                    }
+                )
+
+        year_rows.append(
+            {
+                "Year": year,
+                "Distance Men Racers": metrics[("Distance", "Men")][0],
+                "Distance Women Racers": metrics[("Distance", "Women")][0],
+                "Sprint Men Racers": metrics[("Sprint", "Men")][0],
+                "Sprint Women Racers": metrics[("Sprint", "Women")][0],
+                "Distance Men Total Points": metrics[("Distance", "Men")][1],
+                "Distance Men Avg Points": metrics[("Distance", "Men")][2],
+                "Distance Women Total Points": metrics[("Distance", "Women")][1],
+                "Distance Women Avg Points": metrics[("Distance", "Women")][2],
+                "Sprint Men Total Points": metrics[("Sprint", "Men")][1],
+                "Sprint Men Avg Points": metrics[("Sprint", "Men")][2],
+                "Sprint Women Total Points": metrics[("Sprint", "Women")][1],
+                "Sprint Women Avg Points": metrics[("Sprint", "Women")][2],
+            }
         )
 
-    # 3) set value using best available strategy
-    if _is_select_element(control_el):
-        if not _try_set_filter_by_select(driver, control_el, option_text):
-            raise RuntimeError(f"Failed selecting '{option_text}' in <select> for '{label_contains}'.")
-    else:
-        # If it's an input, type and Enter; if it's a div-based dropdown, typing often still works
-        if not _try_set_filter_by_typing(driver, control_el, option_text):
-            # fallback: click + send keys to active element
-            control_el.click()
-            time.sleep(0.2)
-            active = driver.switch_to.active_element
-            active.send_keys(Keys.CONTROL, "a")
-            active.send_keys(option_text)
-            time.sleep(0.2)
-            active.send_keys(Keys.ENTER)
+    write_csv(DETAILS_CSV, detail_rows)
+    write_csv(SUMMARY_CSV, year_rows)
 
-    time.sleep(0.8)  # allow results to refresh
-
-
-def wait_for_table(driver, timeout: int = 30) -> None:
-    wait = WebDriverWait(driver, timeout)
-    wait.until(EC.presence_of_element_located((By.XPATH, "//table")))
-
-
-def scrape_table_to_df(driver) -> pd.DataFrame:
-    """
-    Scrapes the first visible HTML table into a DataFrame.
-    You may need to adjust if the page renders multiple tables.
-    """
-    tables = driver.find_elements(By.XPATH, "//table")
-    if not tables:
-        return pd.DataFrame()
-
-    table = tables[0]
-
-    # header
-    headers = []
-    try:
-        ths = table.find_elements(By.XPATH, ".//thead//th")
-        headers = [th.text.strip() for th in ths if th.text.strip()]
-    except Exception:
-        headers = []
-
-    # rows
-    body_rows = table.find_elements(By.XPATH, ".//tbody//tr")
-    data = []
-    for tr in body_rows:
-        tds = tr.find_elements(By.XPATH, ".//td")
-        row = [td.text.strip() for td in tds]
-        if any(row):
-            data.append(row)
-
-    df = pd.DataFrame(data)
-    if headers and len(headers) == df.shape[1]:
-        df.columns = headers
-
-    return df
-
-
-def extract_points_column(df: pd.DataFrame) -> pd.Series:
-    """
-    Attempts to find the points column and convert to float.
-    Adjust column name guesses if needed.
-    """
-    possible_cols = ["Points", "CPL Points", "Point", "Pts"]
-    col = None
-    for c in possible_cols:
-        if c in df.columns:
-            col = c
-            break
-
-    # If unknown headers, guess last numeric-ish column
-    if col is None:
-        # try each column from right to left and see which parses best
-        best = None
-        best_nonnull = -1
-        for c in df.columns[::-1]:
-            s = df[c].astype(str).str.replace(",", "", regex=False)
-            nums = pd.to_numeric(s, errors="coerce")
-            nn = nums.notna().sum()
-            if nn > best_nonnull:
-                best_nonnull = nn
-                best = nums
-        if best is None:
-            return pd.Series(dtype=float)
-        return best
-
-    s = df[col].astype(str).str.replace(",", "", regex=False)
-    return pd.to_numeric(s, errors="coerce")
-
-
-def build_driver(headless: bool = False) -> webdriver.Chrome:
-    opts = webdriver.ChromeOptions()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument("--window-size=1400,1000")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=opts)
-
-
-def main():
-    _safe_mkdir(OUT_DIR)
-    driver = build_driver(headless=False)
-    driver.get(URL)
-
-    # Give the page time to initialize
-    time.sleep(3)
-
-    results: List[ScrapeResult] = []
-
-    try:
-        for year_label, season_text in YEARS:
-            for discipline, record_text in RECORDS.items():
-                for sex_group, sex_text in SEXES.items():
-                    # ---- Set filters ----
-                    # These label_contains strings are the most likely to need tweaking.
-                    # Open DevTools → Elements, find the filter labels used on the page,
-                    # then update these calls accordingly.
-                    set_filter_by_label_xpath(driver, "record", record_text)
-                    set_filter_by_label_xpath(driver, "season", season_text)   # may be "Year" or "Season"
-                    set_filter_by_label_xpath(driver, "division", DIVISION_TEXT)
-                    set_filter_by_label_xpath(driver, "sex", sex_text)
-
-                    # If there is a "Status" or "List type" filter, you can add it here:
-                    # set_filter_by_label_xpath(driver, "status", "Final")
-
-                    wait_for_table(driver)
-                    df = scrape_table_to_df(driver)
-
-                    # Save raw export
-                    out_csv = f"{OUT_DIR}/CPL_{year_label}_{discipline}_{sex_group}.csv"
-                    df.to_csv(out_csv, index=False)
-
-                    results.append(ScrapeResult(
-                        year_label=year_label,
-                        season_text=season_text,
-                        discipline=discipline,
-                        sex_group=sex_group,
-                        record_text=record_text,
-                        rows=df
-                    ))
-
-                    print(f"Saved {out_csv} ({len(df)} rows)")
-
-        # ---- Build summary ----
-        summary_rows = []
-        for r in results:
-            pts = extract_points_column(r.rows)
-            pts = pts.dropna()
-            summary_rows.append({
-                "Year": r.year_label,
-                "Season": r.season_text,
-                "Discipline": r.discipline,
-                "Sex": r.sex_group,
-                "Racers": int(len(r.rows)),
-                "Total Points": float(pts.sum()) if len(pts) else 0.0,
-                "Average Points": float(pts.mean()) if len(pts) else 0.0,
-            })
-
-        summary = pd.DataFrame(summary_rows)
-        summary.to_csv(SUMMARY_OUT, index=False)
-        print(f"\nWrote summary -> {SUMMARY_OUT}\n")
-
-        # Optional: pivot to match your exact layout
-        pivot = summary.pivot_table(
-            index="Year",
-            columns=["Sex", "Discipline"],
-            values=["Racers", "Total Points", "Average Points"],
-            aggfunc="first"
+    print(f"Wrote {DETAILS_CSV}")
+    print(f"Wrote {SUMMARY_CSV}")
+    print()
+    print("Year | Dist M | Dist W | Spr M | Spr W | Dist M Tot | Dist W Tot | Spr M Tot | Spr W Tot")
+    print("-" * 95)
+    for r in year_rows:
+        print(
+            f"{r['Year']} | "
+            f"{r['Distance Men Racers']} | {r['Distance Women Racers']} | "
+            f"{r['Sprint Men Racers']} | {r['Sprint Women Racers']} | "
+            f"{r['Distance Men Total Points']:.2f} | {r['Distance Women Total Points']:.2f} | "
+            f"{r['Sprint Men Total Points']:.2f} | {r['Sprint Women Total Points']:.2f}"
         )
-        pivot.to_csv("cpl_sask_pivot_like_table.csv")
-        print("Wrote pivot-like table -> cpl_sask_pivot_like_table.csv")
-
-    finally:
-        driver.quit()
 
 
 if __name__ == "__main__":
